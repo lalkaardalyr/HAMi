@@ -65,7 +65,7 @@ spec:
     resources:
       limits:
         nvidia.com/gpu: 1
-        nvidia.com/gpumem: 4096   # 4GB GPU memory
+        nvidia.com/gpumem: 8192   # 8GB GPU memory (increased from default 4096)
         nvidia.com/gpucores: 50   # 50% GPU compute
 ```
 
