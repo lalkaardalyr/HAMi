@@ -1,107 +1,87 @@
-##### Global variables #####
-include version.mk Makefile.defs
+# Makefile for HAMi - Heterogeneous AI Computing Virtualization Middleware
 
-HAMI_VERSION_PKG=github.com/Project-HAMi/HAMi/pkg
+BINARY_NAME ?= hami
+IMAGE_NAME ?= hami
+IMAGE_TAG ?= latest
+REGISTRY ?= ghcr.io/hami-io
 
-ifndef GITHUB_ACTIONS
-	REVISION?=$(shell git rev-parse --short HEAD)
-else
-	REVISION=$(GITHUB_SHA)
-endif
+GO ?= go
+GOFLAGS ?= -trimpath
+GOOS ?= linux
+GOARCH ?= amd64
 
-##### The ldflags for the go build process to set the version related data.
-GO_BUILD_LDFLAGS=\
-	-s \
-	-w \
-	-X $(HAMI_VERSION_PKG)/version.version=$(VERSION)  \
-	-X $(HAMI_VERSION_PKG)/device-plugin/nvidiadevice/nvinternal/info.version=$(VERSION) \
-	-X $(HAMI_VERSION_PKG)/version.revision=$(REVISION)  \
-	-X $(HAMI_VERSION_PKG)/version.buildDate=$(shell date +"%Y%m%d-%T")
+GIT_COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+GIT_VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+BUILD_DATE := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
+
+LDFLAGS := -ldflags "-X main.gitCommit=$(GIT_COMMIT) \
+	-X main.gitVersion=$(GIT_VERSION) \
+	-X main.buildDate=$(BUILD_DATE) \
+	-s -w"
+
+.PHONY: all build clean test lint fmt vet docker-build docker-push help
 
 all: build
 
-docker:
-	docker build \
-	--build-arg GOLANG_IMAGE=${GOLANG_IMAGE} \
-	--build-arg TARGET_ARCH=${TARGET_ARCH} \
-	--build-arg NVIDIA_IMAGE=${NVIDIA_IMAGE} \
-	--build-arg DEST_DIR=${DEST_DIR} \
-	--build-arg VERSION=${VERSION} \
-	--build-arg GOPROXY=https://goproxy.cn,direct \
-	. -f=docker/Dockerfile -t ${IMG_TAG}
+## build: Build all binaries
+build:
+	@echo "Building $(BINARY_NAME)..."
+	CGO_ENABLED=0 GOOS=$(GOOS) GOARCH=$(GOARCH) $(GO) build $(GOFLAGS) $(LDFLAGS) ./...
 
-dockerwithlib:
-	docker build \
-	--no-cache \
-	--build-arg GOLANG_IMAGE=${GOLANG_IMAGE} \
-	--build-arg TARGET_ARCH=${TARGET_ARCH} \
-	--build-arg NVIDIA_IMAGE=${NVIDIA_IMAGE} \
-	--build-arg DEST_DIR=${DEST_DIR} \
-	--build-arg VERSION=${VERSION} \
-	--build-arg GOPROXY=https://goproxy.cn,direct \
-	. -f=docker/Dockerfile.withlib -t ${IMG_TAG}
+## test: Run unit tests
+test:
+	@echo "Running tests..."
+	$(GO) test -v -race -coverprofile=coverage.out ./...
 
+## test-coverage: Show test coverage report
+test-coverage: test
+	$(GO) tool cover -html=coverage.out -o coverage.html
+
+## lint: Run golangci-lint
+lint:
+	@echo "Running linter..."
+	golangci-lint run ./...
+
+## fmt: Format Go source code
+fmt:
+	@echo "Formatting code..."
+	$(GO) fmt ./...
+
+## vet: Run go vet
+vet:
+	@echo "Running go vet..."
+	$(GO) vet ./...
+
+## clean: Remove build artifacts
+clean:
+	@echo "Cleaning..."
+	rm -f coverage.out coverage.html
+	$(GO) clean ./...
+
+## docker-build: Build Docker image
+docker-build:
+	@echo "Building Docker image $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)..."
+	docker build \
+		--build-arg GIT_COMMIT=$(GIT_COMMIT) \
+		--build-arg GIT_VERSION=$(GIT_VERSION) \
+		--build-arg BUILD_DATE=$(BUILD_DATE) \
+		-t $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG) .
+
+## docker-push: Push Docker image to registry
+docker-push:
+	@echo "Pushing Docker image $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)..."
+	docker push $(REGISTRY)/$(IMAGE_NAME):$(IMAGE_TAG)
+
+## generate: Run go generate
+generate:
+	$(GO) generate ./...
+
+## tidy: Tidy go modules
 tidy:
 	$(GO) mod tidy
 
-proto:
-	$(GO) get github.com/gogo/protobuf/protoc-gen-gofast@v1.3.2
-	protoc --gofast_out=plugins=grpc:. ./pkg/api/*.proto
-
-build: $(CMDS) $(DEVICES)
-
-$(CMDS):
-	$(GO) build -ldflags '$(GO_BUILD_LDFLAGS)' -o ${OUTPUT_DIR}/$@ ./cmd/$@
-
-$(DEVICES):
-	$(GO) build -ldflags '$(GO_BUILD_LDFLAGS)' -o ${OUTPUT_DIR}/$@-device-plugin ./cmd/device-plugin/$@
-
-clean:
-	$(GO) clean -r -x ./cmd/...
-	-rm -rf $(OUTPUT_DIR)
-
-.PHONY: all build docker clean test $(CMDS)
-
-test:
-	mkdir -p ./_output/coverage/
-	bash hack/unit-test.sh
-
-lint:
-	bash hack/verify-staticcheck.sh
-
-.PHONY: verify
-verify:
-	hack/verify-all.sh
-
-.PHONY: lint_dockerfile
-lint_dockerfile:
-	@ docker run --rm \
-          -v $(ROOT_DIR)/.trivyignore:/.trivyignore \
-          -v /tmp/trivy:/root/trivy.cache/  \
-          -v $(ROOT_DIR):/tmp/src  \
-          aquasec/trivy:$(TRIVY_VERSION) config --exit-code 1  --severity $(LINT_TRIVY_SEVERITY_LEVEL) /tmp/src/docker  ; \
-      (($$?==0)) || { echo "error, failed to check dockerfile trivy" && exit 1 ; } ; \
-      echo "dockerfile trivy check: pass"
-
-.PHONY: lint_chart
-lint_chart:
-	@ docker run --rm \
-          -v $(ROOT_DIR)/.trivyignore:/.trivyignore \
-          -v /tmp/trivy:/root/trivy.cache/  \
-          -v $(ROOT_DIR):/tmp/src  \
-          aquasec/trivy:$(TRIVY_VERSION) config --exit-code 1  --severity $(LINT_TRIVY_SEVERITY_LEVEL) /tmp/src/charts  ; \
-      (($$?==0)) || { echo "error, failed to check chart trivy" && exit 1 ; } ; \
-      echo "chart trivy check: pass"
-
-.PHONY: e2e-env-setup
-e2e-env-setup:
-	./hack/e2e-test-setup.sh
-
-.PHONY: helm-deploy
-helm-deploy:
-	./hack/deploy-helm.sh "${E2E_TYPE}" "${KUBE_CONF}" "${HAMI_VERSION}"
-
-.PHONY: e2e-test
-e2e-test:
-	./hack/e2e-test.sh "${E2E_TYPE}" "${KUBE_CONF}"
-
+## help: Show this help message
+help:
+	@echo "Usage: make [target]"
+	@echo ""
+	@grep -E '^## ' $(MAKEFILE_LIST) | sed 's/## /  /' | column -t -s ':'
